@@ -185,7 +185,7 @@ public class IdentityUI {
 
             let msg = "Attempt to present updated terms while another Identity UI flow is already presented."
             assertionFailure(msg)
-            log(self, msg)
+            log(from: self, msg)
         }
 
         let navigationController = DismissableNavigationController {
@@ -353,7 +353,7 @@ extension IdentityUI: FlowCoordinator {
             guard case let .byRoute(route, _) = input else {
                 let msg = "Attempt to present a new Identity UI instance while another one is already presented."
                 assertionFailure(msg)
-                log(self, msg)
+                log(from: self, msg)
                 return
             }
 
