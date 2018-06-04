@@ -119,6 +119,7 @@ extension UIApplication {
 private struct InitializeLogger {
     init() {
         Logger.shared.addTransport({ print($0) })
+        Logger.shared.outputTags = true
     }
 }
 

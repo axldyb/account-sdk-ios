@@ -22,9 +22,6 @@ class FetchAgreementsStatusTask: TaskProtocol {
             oauthToken: tokens.accessToken,
             userID: userID
         ) { [weak self] result in
-
-            log(from: self, result)
-
             guard let strongSelf = self else { return }
 
             guard strongSelf.user != nil else {
