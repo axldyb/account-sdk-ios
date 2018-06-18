@@ -134,7 +134,7 @@ public class IdentityUI {
 
     lazy var navigationController: UINavigationController = {
         DismissableNavigationController { [weak self] in
-            self?.complete(with: .cancel)
+            self?.complete(with: .cancel, presentingViewController: self?.navigationController.presentingViewController)
         }
     }()
 
@@ -253,7 +253,7 @@ public class IdentityUI {
                 scopes: scopes
             )
         ) { [weak self] output in
-            self?.complete(with: output)
+            self?.complete(with: output, presentingViewController: viewController)
         }
     }
 
@@ -274,21 +274,23 @@ public class IdentityUI {
     public func presentIdentityProcess(from viewController: UIViewController, route: Route) {
         self.configuration.tracker?.loginMethod = route.loginMethod
         self.start(input: .byRoute(route, presentingViewController: viewController)) { [weak self] output in
-            self?.complete(with: output)
+            self?.complete(with: output, presentingViewController: viewController)
         }
     }
 
-    private func complete(with output: Output) {
+    private func complete(with output: Output, presentingViewController: UIViewController?) {
         guard IdentityUI.presentedIdentityUI != nil else {
             // IdentityUI has been already dismissed.
             return
         }
 
         let uiResult: IdentityUIResult?
+        var shouldPersistUser = false
         switch output {
-        case let .success(user):
+        case let .success(user, persistUser):
             self.configuration.tracker?.engagement(.network(.done))
             uiResult = .completed(user)
+            shouldPersistUser = persistUser
         case .cancel:
             self.configuration.tracker?.loginID = nil
             uiResult = .canceled
@@ -300,27 +302,64 @@ public class IdentityUI {
             uiResult = .failed(error)
         }
 
-        // This is no more the currently presented login flow.
-        IdentityUI.presentedIdentityUI = nil
-
         let finish = { [weak self] in
+            if case let .completed(user)? = uiResult, shouldPersistUser {
+                user.persistCurrentTokens()
+            }
             if let result = uiResult {
                 self?.delegate?.didFinish(result: result)
             }
         }
 
-        if self.navigationController.presentingViewController != nil {
-            // It might be that `IdentityUIViewController.endLoading()` has been called just before getting here, in case the result of a networking
-            // operation caused the flow to end. The `endLoading()` method will then trigger a `view.isUserInteractionEnabled = true`, which would cause the
-            // keyboard to show up again during the dismiss animation, resulting in a very weird and funky UI glitch. In order to avoid that, we force an
-            // `endEditing()` on the topmost view (if any) before starting the view dismissing.
-            self.navigationController.topViewController?.view.endEditing(true)
+        let dismissFlow = { [weak self] in
 
-            self.navigationController.dismiss(animated: true) {
+            // This is no more the currently presented login flow
+            IdentityUI.presentedIdentityUI = nil
+
+            if self?.navigationController.presentingViewController != nil {
+                // It might be that `IdentityUIViewController.endLoading()` has been called just before getting here, in case the result of a networking
+                // operation caused the flow to end. The `endLoading()` method will then trigger a `view.isUserInteractionEnabled = true`, which would cause the
+                // keyboard to show up again during the dismiss animation, resulting in a very weird and funky UI glitch. In order to avoid that, we force an
+                // `endEditing()` on the topmost view (if any) before starting the view dismissing.
+                self?.navigationController.topViewController?.view.endEditing(true)
+
+                self?.navigationController.dismiss(animated: true) {
+                    finish()
+                }
+            } else {
                 finish()
             }
+        }
+
+        let restartFlow = { [weak self, weak presentingViewController] in
+            guard let strongSelf = self else { return }
+            if strongSelf.navigationController.presentingViewController != nil {
+                strongSelf.navigationController.popToRootViewController(animated: true)
+            } else {
+                strongSelf.configuration.presentationHook?(strongSelf.navigationController)
+                presentingViewController?.present(strongSelf.navigationController, animated: true)
+            }
+        }
+
+        if let delegate = self.delegate, case let .completed(user)? = uiResult {
+            delegate.willSucceed(with: user, on: self.navigationController.topViewController) { disposition in
+                switch disposition {
+                case .continue:
+                    dismissFlow()
+                case let .failed(title: title, message: message):
+                    if self.navigationController.presentingViewController == nil {
+                        // We don't have a presented flow already, so we go on presenting a new one (just for the sake of presenting the error message).
+                        presentingViewController?.present(self.navigationController, animated: true)
+                    }
+                    self.presentError(title: title, description: message) {
+                        restartFlow()
+                    }
+                case .restart:
+                    restartFlow()
+                }
+            }
         } else {
-            finish()
+            dismissFlow()
         }
     }
 }
@@ -337,7 +376,7 @@ extension IdentityUI: FlowCoordinator {
     }
 
     enum Output {
-        case success(User)
+        case success(user: User, persistUser: Bool)
         case cancel
         case onlyDismiss
         case failure(ClientError)
@@ -463,7 +502,7 @@ extension IdentityUI {
                         )
                     case let .abort(shouldDismiss):
                         if shouldDismiss {
-                            self?.complete(with: .onlyDismiss)
+                            self?.complete(with: .onlyDismiss, presentingViewController: nil)
                         }
                     case let .showError(title, description):
                         self?.presentError(title: title, description: description)
@@ -541,10 +580,7 @@ extension IdentityUI {
         self.spawnChild(coordinator, input: input) { [weak self] output in
             switch output {
             case let .success(user, persistUser):
-                if persistUser {
-                    user.persistCurrentTokens()
-                }
-                completion(.success(user))
+                completion(.success(user: user, persistUser: persistUser))
             case .cancel:
                 completion(.cancel)
             case .back:
@@ -579,7 +615,7 @@ extension IdentityUI {
                 // The user changed her password after requesting a password change: we present a new login flow with the email prefilled (since we previously
                 // saved it on password change request).
                 self.spawnCoordinator(.password, for: Identifier(email), on: .signin, scopes: scopes) { [weak self] output in
-                    self?.complete(with: output)
+                    self?.complete(with: output, presentingViewController: presentingViewController)
                 }
             }
         case let .validateAuthCode(code, shouldPersistUser):
@@ -590,7 +626,7 @@ extension IdentityUI {
                     self?.configuration.tracker?.loginID = self?.identityManager.currentUser.legacyID
                     self?.configuration.tracker?.engagement(.network(.accountVerified))
                     // User has validated the identifier and the code matches, nothing else to do.
-                    self?.complete(with: .success(user))
+                    self?.complete(with: .success(user: user, persistUser: shouldPersistUser), presentingViewController: presentingViewController)
                 case let .failure(error):
                     if let navigationController = self?.navigationController, navigationController.presentingViewController == nil {
                         // We don't have a presented flow already, so we go on presenting a new one (just for the sake of presenting the error message).
